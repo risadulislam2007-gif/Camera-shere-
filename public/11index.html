@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Camera Share</title>
+<script src="/socket.io/socket.io.js"></script>
+
+<style>
+body{
+  margin:0;
+  padding:20px;
+  background:#111;
+  color:white;
+  font-family:Arial;
+}
+.box{
+  max-width:600px;
+  margin:auto;
+  background:#1d1d1d;
+  padding:20px;
+  border-radius:15px;
+}
+input,button{
+  width:100%;
+  padding:13px;
+  margin:7px 0;
+  box-sizing:border-box;
+  border-radius:8px;
+  border:0;
+}
+button{
+  background:#2196f3;
+  color:white;
+  font-size:16px;
+}
+.stop{background:#e53935}
+video{
+  width:100%;
+  margin-top:15px;
+  border-radius:12px;
+  background:#000;
+}
+#status,#live{
+  margin-top:10px;
+  padding:10px;
+  background:#292929;
+  border-radius:8px;
+  text-align:center;
+}
+</style>
+</head>
+
+<body>
+
+<div class="box">
+
+<h2>📷 Live Camera</h2>
+
+<input id="room" placeholder="Room ID">
+
+<button onclick="join()">Join Room</button>
+
+<div id="status">Room এ Join করুন</div>
+
+<hr>
+
+<button onclick="start()">📷 Start Camera</button>
+
+<button class="stop" onclick="stop()">⛔ Stop Camera</button>
+
+<video id="local" autoplay muted playsinline></video>
+
+<hr>
+
+<h3>👀 Live Viewer</h3>
+
+<video id="remote" autoplay playsinline></video>
+
+<div id="live">Waiting...</div>
+
+</div>
+
+<script>
+
+const socket=io();
+
+let room="";
+let stream=null;
+let pc=null;
+let pendingICE=[];
+
+
+/* JOIN ROOM */
+
+function join(){
+
+  room=document.getElementById("room").value.trim();
+
+  if(!room){
+    alert("Room ID দিন");
+    return;
+  }
+
+  socket.emit("join-room",room);
+
+  status("Joining room...");
+
+}
+
+
+/* CAMERA */
+
+async function start(){
+
+  if(!room){
+    alert("আগে Room ID দিয়ে Join করুন");
+    return;
+  }
+
+  try{
+
+    stream=await navigator.mediaDevices.getUserMedia({
+      video:true,
+      audio:false
+    });
+
+    document.getElementById("local").srcObject=stream;
+
+    status("🟢 Camera চালু");
+
+    if(pc) pc.close();
+
+    createPC();
+
+    const offer=await pc.createOffer();
+
+    await pc.setLocalDescription(offer);
+
+    socket.emit("offer",{
+      roomId:room,
+      offer:offer
+    });
+
+  }catch(e){
+
+    status("❌ Camera permission দেওয়া হয়নি");
+
+  }
+
+}
+
+
+/* CREATE CONNECTION */
+
+function createPC(){
+
+  pc=new RTCPeerConnection({
+    iceServers:[
+      {urls:"stun:stun.l.google.com:19302"},
+      {urls:"stun:stun1.l.google.com:19302"}
+    ]
+  });
+
+
+  if(stream){
+
+    stream.getTracks().forEach(track=>{
+      pc.addTrack(track,stream);
+    });
+
+  }
+
+
+  pc.ontrack=e=>{
+
+    document.getElementById("remote").srcObject=e.streams[0];
+
+    document.getElementById("live").innerText="🟢 LIVE";
+
+  };
+
+
+  pc.onicecandidate=e=>{
+
+    if(e.candidate){
+
+      socket.emit("ice-candidate",{
+        roomId:room,
+        candidate:e.candidate
+      });
+
+    }
+
+  };
+
+
+  pc.onconnectionstatechange=()=>{
+
+    if(pc.connectionState==="connected"){
+      document.getElementById("live").innerText="🟢 LIVE";
+    }
+
+    if(
+      pc.connectionState==="disconnected" ||
+      pc.connectionState==="failed"
+    ){
+      document.getElementById("live").innerText="🔴 Disconnected";
+    }
+
+  };
+
+}
+
+
+/* OFFER */
+
+socket.on("offer",async offer=>{
+
+  /*
+    যার camera নেই সে Viewer
+  */
+
+  if(stream) return;
+
+  createPC();
+
+  await pc.setRemoteDescription(offer);
+
+  const answer=await pc.createAnswer();
+
+  await pc.setLocalDescription(answer);
+
+  socket.emit("answer",{
+    roomId:room,
+    answer:answer
+  });
+
+  for(const c of pendingICE){
+    await pc.addIceCandidate(c);
+  }
+
+  pendingICE=[];
+
+});
+
+
+/* ANSWER */
+
+socket.on("answer",async answer=>{
+
+  if(pc){
+
+    await pc.setRemoteDescription(answer);
+
+    for(const c of pendingICE){
+      await pc.addIceCandidate(c);
+    }
+
+    pendingICE=[];
+
+  }
+
+});
+
+
+/* ICE */
+
+socket.on("ice-candidate",async candidate=>{
+
+  if(
+    pc &&
+    pc.remoteDescription
+  ){
+
+    try{
+      await pc.addIceCandidate(candidate);
+    }catch(e){}
+
+  }else{
+
+    pendingICE.push(candidate);
+
+  }
+
+});
+
+
+/* STOP CAMERA */
+
+function stop(){
+
+  if(stream){
+
+    stream.getTracks().forEach(t=>t.stop());
+
+    stream=null;
+
+  }
+
+  document.getElementById("local").srcObject=null;
+
+  if(pc){
+    pc.close();
+    pc=null;
+  }
+
+  document.getElementById("live").innerText="⛔ Camera stopped";
+
+  socket.emit("camera-stopped",{
+    roomId:room
+  });
+
+}
+
+
+/* EVENTS */
+
+socket.on("room-created",()=>{
+  status("🟢 Room তৈরি হয়েছে");
+});
+
+socket.on("room-ready",()=>{
+  status("🟢 Device connected");
+});
+
+socket.on("room-full",()=>{
+  status("❌ Room full");
+});
+
+socket.on("camera-stopped",()=>{
+  document.getElementById("remote").srcObject=null;
+  document.getElementById("live").innerText="⛔ Camera stopped";
+});
+
+socket.on("peer-disconnected",()=>{
+  document.getElementById("remote").srcObject=null;
+  document.getElementById("live").innerText="🔴 Disconnected";
+});
+
+
+function status(text){
+  document.getElementById("status").innerText=text;
+}
+
+</script>
+
+</body>
+</html>
